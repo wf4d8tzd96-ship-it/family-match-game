@@ -153,9 +153,35 @@ h1 {
   transition: transform 160ms ease, filter 160ms ease;
 }
 
+.sound-button {
+  position: relative;
+  z-index: 1;
+  min-height: 46px;
+  padding: 0 14px;
+  border: 1px solid rgba(108, 199, 161, 0.55);
+  border-radius: 8px;
+  color: #24533a;
+  background: linear-gradient(180deg, #f5fff8 0%, #dff7e9 100%);
+  box-shadow: 0 8px 18px rgba(47, 138, 109, 0.14);
+  cursor: pointer;
+  transition: transform 160ms ease, filter 160ms ease, box-shadow 160ms ease;
+}
+
 .reset-button:hover {
   transform: translateY(-1px);
   filter: brightness(1.04);
+}
+
+.sound-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.03);
+  box-shadow: 0 10px 20px rgba(47, 138, 109, 0.18);
+}
+
+.sound-button[aria-pressed="false"] {
+  color: #766d65;
+  border-color: rgba(118, 109, 101, 0.32);
+  background: linear-gradient(180deg, #fff 0%, #f2eee8 100%);
 }
 
 .content {
@@ -235,7 +261,7 @@ h1 {
   gap: clamp(5px, 0.8vw, 9px);
   width: min(100%, 720px);
   margin: 0 auto;
-  touch-action: manipulation;
+  touch-action: none;
 }
 
 .tile {
@@ -567,6 +593,7 @@ h1 {
             <span>步数</span>
             <strong id="moves">30</strong>
           </div>
+          <button class="sound-button" id="soundButton" type="button" aria-pressed="true">音效：开</button>
           <button class="reset-button" id="restartButton" type="button">重新开始</button>
         </section>
       </header>
@@ -598,6 +625,7 @@ const SIZE = 9;
 const INITIAL_MOVES = 30;
 const CLEAR_DELAY = 820;
 const DROP_DELAY = 430;
+const SWIPE_THRESHOLD = 26;
 
 const MEMBERS = [
   {
@@ -715,6 +743,9 @@ const state = {
   gameOver: false,
   effects: new Map(),
   scorePopups: [],
+  soundEnabled: true,
+  dragStart: null,
+  suppressClick: false,
 };
 
 const boardEl = document.getElementById("board");
@@ -725,6 +756,8 @@ const finalScoreEl = document.getElementById("finalScore");
 const gameOverModal = document.getElementById("gameOverModal");
 const restartButton = document.getElementById("restartButton");
 const modalRestartButton = document.getElementById("modalRestartButton");
+const soundButton = document.getElementById("soundButton");
+let audioContext = null;
 
 function randomMember() {
   return MEMBERS[Math.floor(Math.random() * MEMBERS.length)].id;
@@ -779,6 +812,11 @@ function renderBoard() {
         tile.classList.add(effect);
       }
 
+      tile.addEventListener("pointerdown", (event) => handlePointerDown(event, row, col));
+      tile.addEventListener("pointerup", (event) => handlePointerUp(event, row, col));
+      tile.addEventListener("pointercancel", () => {
+        state.dragStart = null;
+      });
       tile.addEventListener("click", () => handleTileClick(row, col));
       boardEl.appendChild(tile);
     }
@@ -803,6 +841,43 @@ function renderScorePopups() {
     }
     boardEl.appendChild(scorePopup);
   });
+}
+
+function handlePointerDown(event, row, col) {
+  if (state.locked || state.gameOver) return;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  state.dragStart = {
+    row,
+    col,
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
+function handlePointerUp(event, row, col) {
+  if (!state.dragStart || state.locked || state.gameOver) return;
+  const start = state.dragStart;
+  state.dragStart = null;
+
+  if (start.row !== row || start.col !== col) return;
+
+  const dx = event.clientX - start.x;
+  const dy = event.clientY - start.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_THRESHOLD) return;
+
+  const target =
+    Math.abs(dx) > Math.abs(dy)
+      ? { row, col: col + Math.sign(dx) }
+      : { row: row + Math.sign(dy), col };
+
+  if (!isInsideBoard(target)) return;
+
+  state.suppressClick = true;
+  state.selected = null;
+  attemptSwap({ row, col }, target);
+  window.setTimeout(() => {
+    state.suppressClick = false;
+  }, 0);
 }
 
 function initBoard() {
@@ -840,6 +915,7 @@ function restartGame() {
 }
 
 function handleTileClick(row, col) {
+  if (state.suppressClick) return;
   if (state.locked || state.gameOver) return;
 
   if (!state.selected) {
@@ -866,6 +942,10 @@ function handleTileClick(row, col) {
 
 function isAdjacent(a, b) {
   return Math.abs(a.row - b.row) + Math.abs(a.col - b.col) === 1;
+}
+
+function isInsideBoard(cell) {
+  return cell.row >= 0 && cell.row < SIZE && cell.col >= 0 && cell.col < SIZE;
 }
 
 async function attemptSwap(a, b) {
@@ -979,6 +1059,7 @@ async function resolveMatches(matches, chain) {
     setEffects(Array.from(current.cells.values()), "matching");
     state.scorePopups = popups;
     renderBoard();
+    playClearSound(chainRound, current.groups.length);
     await wait(CLEAR_DELAY);
     state.scorePopups = [];
 
@@ -1076,8 +1157,54 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getAudioContext() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+  return audioContext;
+}
+
+function playClearSound(chain, groupCount) {
+  if (!state.soundEnabled) return;
+  const context = getAudioContext();
+  const now = context.currentTime;
+  const base = chain === 1 ? 523.25 : chain === 2 ? 659.25 : 783.99;
+  const notes = [base, base * 1.25, base * 1.5 + groupCount * 12];
+  notes.forEach((frequency, index) => {
+    playTone(context, frequency, now + index * 0.075, 0.17, 0.08);
+  });
+}
+
+function playTone(context, frequency, start, duration, volume) {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  oscillator.frequency.exponentialRampToValueAtTime(frequency * 1.04, start + duration);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.018);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.03);
+}
+
+function toggleSound() {
+  state.soundEnabled = !state.soundEnabled;
+  soundButton.textContent = state.soundEnabled ? "音效：开" : "音效：关";
+  soundButton.setAttribute("aria-pressed", String(state.soundEnabled));
+  if (state.soundEnabled) {
+    playClearSound(1, 1);
+  }
+}
+
 restartButton.addEventListener("click", restartGame);
 modalRestartButton.addEventListener("click", restartGame);
+soundButton.addEventListener("click", toggleSound);
 
 renderLegend();
 restartGame();
